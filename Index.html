@@ -1,1 +1,232 @@
-index.html
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Ruta Barcelona → Madrid — Mapa con Geolocalización y Fallback</title>
+<link rel="preconnect" href="https://{s}.tile.openstreetmap.org">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+  :root{
+    --panel-bg: rgba(255,255,255,.96);
+    --panel-text:#111;
+    --accent:#0b67ff;
+    --danger:#d7263d;
+  }
+  html,body,#map{height:100%;margin:0;}
+  .leaflet-container{font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+  .legend, .floating-panel{
+    position:absolute; right:.5rem; top:.5rem; z-index:1000;
+    background:var(--panel-bg); color:var(--panel-text);
+    padding:.6rem .7rem; border-radius:.8rem; box-shadow:0 6px 22px rgba(0,0,0,.15);
+    max-width:min(90vw,360px);
+  }
+  .legend h3{margin:.1rem 0 .35rem; font-size:1rem}
+  .legend .item{display:flex; align-items:center; gap:.5rem; margin:.25rem 0}
+  .legend .swatch{width:16px; height:3px; border-radius:2px; background:#1f77b4}
+  .legend .dot{width:10px; height:10px; border-radius:50%; background:#111}
+  .legend .dot.poi{background:#ff9500}
+  .legend .dot.area{background:#2a9d8f}
+  .legend .note{font-size:.82rem; color:#444; margin-top:.4rem}
+  .btn{
+    appearance:none; border:0; background:var(--accent); color:#fff; padding:.55rem .8rem;
+    border-radius:.6rem; font-weight:600; cursor:pointer;
+  }
+  .btn.secondary{background:#111}
+  .btn.danger{background:var(--danger)}
+  .btn.ghost{background:transparent; color:#111; border:1px solid #ccc}
+  .button-row{display:flex; gap:.5rem; margin-top:.4rem; flex-wrap:wrap}
+  .tip{font-size:.8rem; color:#333; margin-top:.3rem}
+  .toast{
+    position:absolute; left:50%; transform:translateX(-50%);
+    bottom:.75rem; background:#111; color:#fff; padding:.6rem .8rem; border-radius:.6rem;
+    box-shadow:0 8px 26px rgba(0,0,0,.25); z-index:1500; display:none;
+  }
+  .badge{display:inline-block; padding:.15rem .4rem; border-radius:.4rem; font-size:.75rem; background:#eee; color:#333}
+  .warn{background:#fff2f2; border:1px solid #ffd5d5; padding:.5rem .6rem; border-radius:.5rem; margin-top:.4rem; font-size:.85rem}
+  @media (max-width:640px){
+    .legend{right:.5rem; left:.5rem; top:auto; bottom:.5rem}
+  }
+</style>
+</head>
+<body>
+<div id="map" role="region" aria-label="Mapa interactivo de la ruta Barcelona a Madrid"></div>
+
+<div class="legend" id="legend">
+  <h3>Ruta Barcelona → Madrid</h3>
+  <div class="item"><span class="swatch"></span> Ruta principal (AP-2 / A-2)</div>
+  <div class="item"><span class="dot"></span> Ciudades</div>
+  <div class="item"><span class="dot poi"></span> Puntos de interés</div>
+  <div class="item"><span class="dot area"></span> Áreas de servicio</div>
+  <div class="note">Toca los íconos para ver detalles. Controla capas en la esquina superior izquierda.</div>
+  <div class="button-row">
+    <button class="btn" id="fitBtn" aria-label="Centrar en la ruta">Centrar ruta</button>
+    <button class="btn secondary" id="geoBtn" aria-label="Ir a mi ubicación">Mi ubicación</button>
+    <button class="btn ghost" id="manualBtn" aria-label="Marcar ubicación manualmente">Marcar manual</button>
+  </div>
+  <div id="geoTips" class="tip"></div>
+  <div id="geoWarn" class="warn" style="display:none"></div>
+</div>
+
+<div id="toast" class="toast" role="status"></div>
+
+<script>
+  // Helper: toast message
+  function toast(msg, ms=2800){
+    const t=document.getElementById('toast');
+    t.textContent = msg;
+    t.style.display='block';
+    clearTimeout(window.__toastTO);
+    window.__toastTO=setTimeout(()=>{t.style.display='none'}, ms);
+  }
+
+  // Base map
+  const map = L.map('map', { zoomControl: true });
+
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 20,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+  const esri = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19,
+    attribution: 'Imagery &copy; Esri'
+  });
+
+  // Points along AP-2 / A-2
+  const points = {
+    barcelona: {name: 'Barcelona (Sagrada Família)', coords: [41.4036, 2.1744]},
+    martorell: {name: 'Martorell (AP-7/AP-2)', coords: [41.4740, 1.9270]},
+    lleida: {name: 'Lleida', coords: [41.6170, 0.6200]},
+    fraga: {name: 'Fraga', coords: [41.5220, 0.3440]},
+    zaragoza: {name: 'Zaragoza (Basílica del Pilar)', coords: [41.6561, -0.8773]},
+    calatayud: {name: 'Calatayud', coords: [41.3530, -1.6430]},
+    alcolea: {name: 'Alcolea del Pinar', coords: [41.0380, -2.5830]},
+    guadalajara: {name: 'Guadalajara', coords: [40.6320, -3.1610]},
+    madrid: {name: 'Madrid (Puerta del Sol)', coords: [40.4168, -3.7038]}
+  };
+  const routeCoords = [
+    points.barcelona.coords,
+    points.martorell.coords,
+    points.lleida.coords,
+    points.fraga.coords,
+    points.zaragoza.coords,
+    points.calatayud.coords,
+    points.alcolea.coords,
+    points.guadalajara.coords,
+    points.madrid.coords
+  ];
+  const ruta = L.polyline(routeCoords, { color:'#1f77b4', weight:5, opacity:.9 });
+
+  // Layers
+  const ciudades = L.layerGroup();
+  const pois = L.layerGroup();
+  const areas = L.layerGroup();
+  const myLayer = L.layerGroup();
+
+  const iconCity = L.divIcon({className:'', html:'<div style="width:12px;height:12px;border-radius:50%;background:#111;border:2px solid #fff;box-shadow:0 0 0 1px #111"></div>', iconSize:[12,12], iconAnchor:[6,6]});
+  const iconPOI = L.divIcon({className:'', html:'<div style="width:12px;height:12px;border-radius:50%;background:#ff9500;border:2px solid #fff;box-shadow:0 0 0 1px #ff9500"></div>', iconSize:[12,12], iconAnchor:[6,6]});
+  const iconArea = L.divIcon({className:'', html:'<div style="width:12px;height:12px;border-radius:50%;background:#2a9d8f;border:2px solid #fff;box-shadow:0 0 0 1px #2a9d8f"></div>', iconSize:[12,12], iconAnchor:[6,6]});
+
+  [['Barcelona (Sagrada Família)', points.barcelona.coords, 'Inicio. Paseo de Gràcia, Barrio Gótico, Montjuïc.'],
+   ['Zaragoza', points.zaragoza.coords, 'Parada intermedia. Basílica del Pilar y Ebro.'],
+   ['Madrid (Puerta del Sol)', points.madrid.coords, 'Final. Prado, Cibeles, centro histórico.'],
+   ['Lleida', points.lleida.coords, 'Seu Vella y río Segre.'],
+   ['Guadalajara', points.guadalajara.coords, 'Palacio del Infantado.'],
+   ['Calatayud', points.calatayud.coords, 'Arquitectura mudéjar.']]
+  .forEach(([name,c,desc])=>L.marker(c,{icon:iconCity}).bindPopup(`<strong>${name}</strong><br>${desc}`).addTo(ciudades));
+
+  [['Basílica del Pilar (vista)', [41.6565, -0.8781], 'Icono barroco de Aragón, a orillas del Ebro.'],
+   ['Acueducto de los Arcos', [41.6539, -0.8946], 'Antiguo acueducto de Zaragoza.']]
+  .forEach(([name,c,desc])=>L.marker(c,{icon:iconPOI}).bindPopup(`<strong>${name}</strong><br>${desc}`).addTo(pois));
+
+  [['Área de Servicio — Pina de Ebro (aprox.)', [41.492, -0.534], 'Descanso y comida.'],
+   ['Área de Servicio — Alcolea del Pinar (aprox.)', [41.06, -2.6], 'Estiramiento y combustible.']]
+  .forEach(([name,c,desc])=>L.marker(c,{icon:iconArea}).bindPopup(`<strong>${name}</strong><br>${desc}`).addTo(areas));
+
+  const rutaGroup = L.layerGroup([ruta]);
+  const baseLayers = {"OpenStreetMap":osm, "Satélite (Esri)":esri};
+  const overlays = {
+    "Ruta principal": rutaGroup,
+    "Ciudades": ciudades,
+    "Puntos de interés": pois,
+    "Áreas de servicio": areas,
+    "Mi ubicación": myLayer
+  };
+  L.control.layers(baseLayers, overlays, {collapsed:false, position:'topleft'}).addTo(map);
+
+  // Show default layers
+  rutaGroup.addTo(map); ciudades.addTo(map); pois.addTo(map); areas.addTo(map);
+
+  function fitRoute(){ map.fitBounds(ruta.getBounds(), {padding:[24,24]}); }
+  fitRoute();
+
+  // Geolocation tips & warnings
+  const geoTips = document.getElementById('geoTips');
+  const geoWarn = document.getElementById('geoWarn');
+  const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost';
+  geoTips.innerHTML = '<span class="badge">Consejo</span> Para usar "Mi ubicación":<br>1) Acepta el permiso del navegador.<br>2) Activa GPS/Ubicación del teléfono.<br>3) Usa HTTPS o localhost. Abrir como <code>file://</code> puede bloquearlo.';
+  if(!isSecure){
+    geoWarn.style.display='block';
+    geoWarn.innerHTML = '⚠️ El contexto no es seguro (<code>' + location.protocol + '</code>). Algunos navegadores bloquean la geolocalización si no es <strong>HTTPS</strong> o <strong>localhost</strong>.';
+  }
+
+  // Marker helpers
+  let myMarker = null;
+  function setMyLocation(lat, lng, text='Estás aquí'){
+    if(myMarker){ myLayer.removeLayer(myMarker); }
+    myMarker = L.circleMarker([lat, lng], {radius:8, weight:2, color:'#111', fillColor:'#0b67ff', fillOpacity:.9})
+      .bindPopup(text).addTo(myLayer).openPopup();
+    if(!map.getBounds().contains([lat,lng])){ map.setView([lat,lng], 12); }
+    overlays["Mi ubicación"].addTo(map);
+    toast('Ubicación establecida');
+  }
+
+  // Buttons
+  document.getElementById('fitBtn').addEventListener('click', fitRoute);
+
+  document.getElementById('geoBtn').addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      toast('Geolocalización no disponible en este dispositivo');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition((pos) => {
+      const {latitude, longitude, accuracy} = pos.coords;
+      setMyLocation(latitude, longitude, 'Estás aquí (±' + Math.round(accuracy) + ' m)');
+    }, (err) => {
+      // Human-friendly errors
+      let msg = 'No se pudo obtener tu ubicación.';
+      if (err.code === 1) msg = 'Permiso denegado. Activa el permiso de ubicación en el navegador.';
+      else if (err.code === 2) msg = 'Posición no disponible. Revisa el GPS/conectividad.';
+      else if (err.code === 3) msg = 'Tiempo de espera agotado. Intenta de nuevo.';
+      toast(msg);
+      // Offer manual mode
+      manualMode(true);
+    }, { enableHighAccuracy:true, timeout:8000, maximumAge:0 });
+  });
+
+  // Manual mode: tap to drop a pin
+  let manualActive = false;
+  function manualMode(on){
+    manualActive = on;
+    const btn = document.getElementById('manualBtn');
+    if(on){
+      btn.classList.add('danger');
+      btn.textContent = 'Manual (toque en el mapa)';
+      toast('Toca el mapa para marcar tu ubicación');
+    }else{
+      btn.classList.remove('danger');
+      btn.textContent = 'Marcar manual';
+    }
+  }
+  document.getElementById('manualBtn').addEventListener('click', ()=>manualMode(!manualActive));
+
+  map.on('click', (e) => {
+    if(!manualActive) return;
+    const {lat, lng} = e.latlng;
+    setMyLocation(lat, lng, 'Marcado manualmente');
+    manualMode(false);
+  });
+</script>
+</body>
+</html>
